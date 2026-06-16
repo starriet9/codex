@@ -336,6 +336,7 @@ pub enum ExecServerError {
         status: reqwest::StatusCode,
         code: Option<String>,
         message: String,
+        retry_after: Option<Duration>,
     },
     #[error("environment registry configuration error: {0}")]
     EnvironmentRegistryConfig(String),
