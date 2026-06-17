@@ -315,7 +315,7 @@ async fn responses_client_stream_request_preserves_exact_json_body() -> Result<(
             phase: None,
             metadata: None,
         }],
-        tools: Vec::new(),
+        tools: Some(Vec::new()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
         reasoning: None,

@@ -1173,7 +1173,7 @@ impl ResponseItem {
             | Self::Compaction { metadata, .. }
             | Self::CompactionTrigger { metadata }
             | Self::ContextCompaction { metadata, .. } => metadata.as_ref(),
-            Self::Other => None,
+            Self::AdditionalTools { .. } | Self::Other => None,
         }
     }
 
@@ -1194,7 +1194,7 @@ impl ResponseItem {
             | Self::Compaction { metadata, .. }
             | Self::CompactionTrigger { metadata }
             | Self::ContextCompaction { metadata, .. } => Some(metadata),
-            Self::Other => None,
+            Self::AdditionalTools { .. } | Self::Other => None,
         }
     }
 }
