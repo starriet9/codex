@@ -66,6 +66,7 @@ use serde::Serialize;
 use supports_color::Stream;
 
 mod background;
+mod desktop_runtime;
 mod git;
 mod output;
 mod progress;
@@ -76,6 +77,7 @@ mod title;
 mod updates;
 
 use background::background_server_check;
+use desktop_runtime::desktop_runtime_check;
 use git::git_check;
 use output::HumanOutputOptions;
 use output::redact_detail;
@@ -427,6 +429,9 @@ async fn build_report(
                 background_server_check,
                 reachability_check,
             ]);
+            checks.push(run_sync_check("desktop runtime", progress.clone(), || {
+                desktop_runtime_check(config.codex_home.as_path(), config.mcp_servers.get())
+            }));
         }
         Err(err) => {
             let reachability_plan = default_reachability_plan();
