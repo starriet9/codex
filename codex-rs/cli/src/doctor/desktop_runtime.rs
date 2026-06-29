@@ -23,6 +23,8 @@ const CHROME_NATIVE_HOSTS_JSON: &str = "chrome-native-hosts.json";
 const CHROME_PLUGIN_MANIFEST: &str =
     "plugins/cache/openai-bundled/chrome/latest/.codex-plugin/plugin.json";
 const NODE_REPL_MCP_SERVER: &str = "node_repl";
+const NODE_REPL_NODE_PATH: &str = "NODE_REPL_NODE_PATH";
+const NODE_REPL_NODE_MODULE_DIRS: &str = "NODE_REPL_NODE_MODULE_DIRS";
 
 pub(super) fn desktop_runtime_check(
     codex_home: &Path,
@@ -82,7 +84,12 @@ fn desktop_runtime_check_from_snapshots(
         None => details.push("installed Chrome plugin version: not found".to_string()),
     }
 
+    append_node_repl_runtime_details_and_issues(&runtime_config, &mut details, &mut issues);
+
     if hosts.is_empty() && manifest_errors.is_empty() {
+        if !issues.is_empty() {
+            return desktop_runtime_check_with_issues(details, issues);
+        }
         return DoctorCheck::new(
             "desktop.browser_runtime",
             "desktop",
@@ -192,6 +199,27 @@ fn desktop_runtime_check_from_snapshots(
         "desktop browser runtime config may be stale"
     };
 
+    desktop_runtime_check_with_status_and_summary(details, issues, status, summary)
+}
+
+fn desktop_runtime_check_with_issues(
+    details: Vec<String>,
+    issues: Vec<DoctorIssue>,
+) -> DoctorCheck {
+    desktop_runtime_check_with_status_and_summary(
+        details,
+        issues,
+        CheckStatus::Warning,
+        "desktop browser runtime config may be stale",
+    )
+}
+
+fn desktop_runtime_check_with_status_and_summary(
+    details: Vec<String>,
+    issues: Vec<DoctorIssue>,
+    status: CheckStatus,
+    summary: &str,
+) -> DoctorCheck {
     let mut check =
         DoctorCheck::new("desktop.browser_runtime", "desktop", status, summary).details(details);
     if status != CheckStatus::Ok {
@@ -203,6 +231,71 @@ fn desktop_runtime_check_from_snapshots(
         check = check.issue(issue);
     }
     check
+}
+
+fn append_node_repl_runtime_details_and_issues(
+    runtime_config: &DesktopRuntimeConfig,
+    details: &mut Vec<String>,
+    issues: &mut Vec<DoctorIssue>,
+) {
+    match &runtime_config.node_repl_command {
+        Some(command) => {
+            details.push(format!(
+                "configured node_repl command: {}",
+                command.display()
+            ));
+            if explicit_path(command) && !command.exists() {
+                issues.push(missing_runtime_path_issue(
+                    "configured node_repl command target is missing",
+                    "mcp_servers.node_repl.command",
+                    command,
+                ));
+            }
+        }
+        None => details.push("configured node_repl command: not set".to_string()),
+    }
+
+    match &runtime_config.node_repl_node_path {
+        Some(path) => {
+            details.push(format!(
+                "configured {NODE_REPL_NODE_PATH}: {}",
+                path.display()
+            ));
+            if !path.exists() {
+                issues.push(missing_runtime_path_issue(
+                    "configured NODE_REPL_NODE_PATH target is missing",
+                    NODE_REPL_NODE_PATH,
+                    path,
+                ));
+            }
+        }
+        None => details.push(format!("configured {NODE_REPL_NODE_PATH}: not set")),
+    }
+
+    if runtime_config.node_repl_node_module_dirs.is_empty() {
+        details.push(format!("configured {NODE_REPL_NODE_MODULE_DIRS}: not set"));
+    } else {
+        for path in &runtime_config.node_repl_node_module_dirs {
+            details.push(format!(
+                "configured {NODE_REPL_NODE_MODULE_DIRS}: {}",
+                path.display()
+            ));
+            if !path.exists() {
+                issues.push(missing_runtime_path_issue(
+                    "configured NODE_REPL_NODE_MODULE_DIRS entry is missing",
+                    NODE_REPL_NODE_MODULE_DIRS,
+                    path,
+                ));
+            }
+        }
+    }
+}
+
+fn missing_runtime_path_issue(cause: &str, field: &str, path: &Path) -> DoctorIssue {
+    DoctorIssue::new(CheckStatus::Warning, cause)
+        .measured(path.display().to_string())
+        .remedy("Restart Codex after updating Codex Desktop. If the path remains missing, relaunch or reinstall Codex Desktop.")
+        .field(field)
 }
 
 fn native_host_config_paths(codex_home: &Path) -> Vec<PathBuf> {
@@ -223,13 +316,24 @@ fn native_host_config_paths(codex_home: &Path) -> Vec<PathBuf> {
 fn desktop_runtime_config_from_mcp_servers(
     mcp_servers: &HashMap<String, McpServerConfig>,
 ) -> DesktopRuntimeConfig {
-    let env = mcp_servers
-        .get(NODE_REPL_MCP_SERVER)
-        .and_then(|server| match &server.transport {
-            McpServerTransportConfig::Stdio { env, .. } => env.as_ref(),
-            McpServerTransportConfig::StreamableHttp { .. } => None,
-        });
-    desktop_runtime_config_from_node_repl_env(env)
+    let Some(server) = mcp_servers.get(NODE_REPL_MCP_SERVER) else {
+        return DesktopRuntimeConfig::default();
+    };
+    match &server.transport {
+        McpServerTransportConfig::Stdio { command, env, .. } => {
+            desktop_runtime_config_from_node_repl_stdio(command, env.as_ref())
+        }
+        McpServerTransportConfig::StreamableHttp { .. } => DesktopRuntimeConfig::default(),
+    }
+}
+
+fn desktop_runtime_config_from_node_repl_stdio(
+    command: &str,
+    env: Option<&HashMap<String, String>>,
+) -> DesktopRuntimeConfig {
+    let mut config = desktop_runtime_config_from_node_repl_env(env);
+    config.node_repl_command = Some(PathBuf::from(command));
+    config
 }
 
 fn desktop_runtime_config_from_node_repl_env(
@@ -241,6 +345,12 @@ fn desktop_runtime_config_from_node_repl_env(
     DesktopRuntimeConfig {
         codex_cli_path: env.get("CODEX_CLI_PATH").map(PathBuf::from),
         codex_app_browser_plugin_version: env.get("BROWSER_USE_CODEX_APP_VERSION").cloned(),
+        node_repl_command: None,
+        node_repl_node_path: env.get(NODE_REPL_NODE_PATH).map(PathBuf::from),
+        node_repl_node_module_dirs: env
+            .get(NODE_REPL_NODE_MODULE_DIRS)
+            .map(|value| env::split_paths(value).collect())
+            .unwrap_or_default(),
     }
 }
 
@@ -261,10 +371,17 @@ fn same_path(left: &Path, right: &Path) -> bool {
     normalize_path_for_compare(left) == normalize_path_for_compare(right)
 }
 
+fn explicit_path(path: &Path) -> bool {
+    path.is_absolute() || path.components().count() > 1
+}
+
 #[derive(Clone, Debug, Default)]
 struct DesktopRuntimeConfig {
     codex_cli_path: Option<PathBuf>,
     codex_app_browser_plugin_version: Option<String>,
+    node_repl_command: Option<PathBuf>,
+    node_repl_node_path: Option<PathBuf>,
+    node_repl_node_module_dirs: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +427,7 @@ mod tests {
             DesktopRuntimeConfig {
                 codex_cli_path: Some(configured_path.clone()),
                 codex_app_browser_plugin_version: Some("26.609.41114".to_string()),
+                ..DesktopRuntimeConfig::default()
             },
             Some("26.609.41114".to_string()),
             Vec::new(),
@@ -357,6 +475,54 @@ mod tests {
     }
 
     #[test]
+    fn desktop_runtime_warns_for_missing_node_repl_runtime_paths_without_native_host_config() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let missing_command = temp.path().join("old-runtime").join("node_repl.exe");
+        let missing_node = temp.path().join("old-runtime").join("node.exe");
+        let missing_modules = temp.path().join("old-runtime").join("node_modules");
+        let missing_command_display = missing_command.display().to_string();
+        let missing_node_display = missing_node.display().to_string();
+        let missing_modules_display = missing_modules.display().to_string();
+        let env = HashMap::from([
+            (
+                NODE_REPL_NODE_PATH.to_string(),
+                missing_node_display.clone(),
+            ),
+            (
+                NODE_REPL_NODE_MODULE_DIRS.to_string(),
+                missing_modules_display.clone(),
+            ),
+        ]);
+        let runtime_config =
+            desktop_runtime_config_from_node_repl_stdio(&missing_command_display, Some(&env));
+
+        let check =
+            desktop_runtime_check_from_snapshots(runtime_config, None, Vec::new(), Vec::new());
+
+        assert_eq!(check.status, CheckStatus::Warning);
+        assert_eq!(check.summary, "desktop browser runtime config may be stale");
+        assert!(check.issues.iter().any(|issue| {
+            issue.cause.contains("node_repl command target is missing")
+                && issue.measured.as_deref() == Some(missing_command_display.as_str())
+                && issue.fields == vec!["mcp_servers.node_repl.command".to_string()]
+        }));
+        assert!(check.issues.iter().any(|issue| {
+            issue
+                .cause
+                .contains("NODE_REPL_NODE_PATH target is missing")
+                && issue.measured.as_deref() == Some(missing_node_display.as_str())
+                && issue.fields == vec![NODE_REPL_NODE_PATH.to_string()]
+        }));
+        assert!(check.issues.iter().any(|issue| {
+            issue
+                .cause
+                .contains("NODE_REPL_NODE_MODULE_DIRS entry is missing")
+                && issue.measured.as_deref() == Some(missing_modules_display.as_str())
+                && issue.fields == vec![NODE_REPL_NODE_MODULE_DIRS.to_string()]
+        }));
+    }
+
+    #[test]
     fn desktop_runtime_config_reads_node_repl_env() {
         let env = HashMap::from([
             (
@@ -367,9 +533,21 @@ mod tests {
                 "BROWSER_USE_CODEX_APP_VERSION".to_string(),
                 "26.609.41114".to_string(),
             ),
+            (
+                NODE_REPL_NODE_PATH.to_string(),
+                r"C:\Users\example\AppData\Local\OpenAI\Codex\runtimes\cua_node\new\bin\node.exe"
+                    .to_string(),
+            ),
+            (
+                NODE_REPL_NODE_MODULE_DIRS.to_string(),
+                "runtime-node-modules".to_string(),
+            ),
         ]);
 
-        let config = desktop_runtime_config_from_node_repl_env(Some(&env));
+        let config = desktop_runtime_config_from_node_repl_stdio(
+            r"C:\Users\example\AppData\Local\OpenAI\Codex\runtimes\cua_node\new\bin\node_repl.exe",
+            Some(&env),
+        );
 
         assert_eq!(
             config.codex_cli_path.as_deref(),
@@ -380,6 +558,22 @@ mod tests {
         assert_eq!(
             config.codex_app_browser_plugin_version.as_deref(),
             Some("26.609.41114")
+        );
+        assert_eq!(
+            config.node_repl_command.as_deref(),
+            Some(Path::new(
+                r"C:\Users\example\AppData\Local\OpenAI\Codex\runtimes\cua_node\new\bin\node_repl.exe"
+            ))
+        );
+        assert_eq!(
+            config.node_repl_node_path.as_deref(),
+            Some(Path::new(
+                r"C:\Users\example\AppData\Local\OpenAI\Codex\runtimes\cua_node\new\bin\node.exe"
+            ))
+        );
+        assert_eq!(
+            config.node_repl_node_module_dirs,
+            vec![PathBuf::from("runtime-node-modules")]
         );
     }
 }
