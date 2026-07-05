@@ -92,6 +92,8 @@ codex_windows_sandbox = { package = "codex-windows-sandbox", path = "../windows-
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_System_Console",
+    "Win32_System_Environment",
+    "Win32_System_Registry",
 ] }
 
 [dev-dependencies]
