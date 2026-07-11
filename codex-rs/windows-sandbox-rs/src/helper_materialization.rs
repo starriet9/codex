@@ -192,6 +192,18 @@ fn sibling_source_path(kind: HelperExecutable) -> Result<PathBuf> {
 }
 
 pub(crate) fn bundled_executable_path_for_exe(exe: &Path, file_name: &str) -> Option<PathBuf> {
+    if let Some(candidate) = bundled_executable_path_for_literal_exe(exe, file_name) {
+        return Some(candidate);
+    }
+
+    let canonical_exe = dunce::canonicalize(exe).ok()?;
+    if canonical_exe == exe {
+        return None;
+    }
+    bundled_executable_path_for_literal_exe(&canonical_exe, file_name)
+}
+
+fn bundled_executable_path_for_literal_exe(exe: &Path, file_name: &str) -> Option<PathBuf> {
     let dir = exe.parent()?;
     let direct_candidate = dir.join(file_name);
     if direct_candidate.is_file() {
@@ -541,6 +553,61 @@ mod tests {
                 .expect("helper path");
 
         assert_eq!(resolved, sibling_helper);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_source_lookup_follows_junctioned_bin_dir() {
+        use std::os::windows::process::CommandExt as _;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let package_dir = tmp.path().join("package");
+        let package_bin_dir = package_dir.join(BIN_DIRNAME);
+        let package_resources_dir = package_dir.join(RESOURCES_DIRNAME);
+        let visible_dir = tmp.path().join("visible");
+        let visible_bin_dir = visible_dir.join(BIN_DIRNAME);
+        fs::create_dir_all(&package_bin_dir).expect("create package bin dir");
+        fs::create_dir_all(&package_resources_dir).expect("create package resources dir");
+        fs::create_dir_all(&visible_dir).expect("create visible dir");
+        let package_exe = package_bin_dir.join("codex.exe");
+        let runner_helper = package_resources_dir.join("codex-command-runner.exe");
+        let setup_helper = package_resources_dir.join("codex-windows-sandbox-setup.exe");
+        fs::write(&package_exe, b"codex").expect("write exe");
+        fs::write(&runner_helper, b"runner").expect("write runner helper");
+        fs::write(&setup_helper, b"setup").expect("write setup helper");
+
+        let link = format!("\"{}\"", visible_bin_dir.display());
+        let target = format!("\"{}\"", package_bin_dir.display());
+        let output = std::process::Command::new("cmd")
+            .raw_arg("/c")
+            .raw_arg("mklink")
+            .raw_arg("/J")
+            .raw_arg(&link)
+            .raw_arg(&target)
+            .output()
+            .expect("run mklink");
+        let status = output.status;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            status.success(),
+            "mklink /J failed: status={status}, stdout={stdout}, stderr={stderr}"
+        );
+
+        let visible_exe = visible_bin_dir.join("codex.exe");
+        let resolved_runner = bundled_executable_path_for_exe(
+            &visible_exe,
+            /*file_name*/ "codex-command-runner.exe",
+        )
+        .expect("runner helper path");
+        let resolved_setup = bundled_executable_path_for_exe(
+            &visible_exe,
+            /*file_name*/ "codex-windows-sandbox-setup.exe",
+        )
+        .expect("setup helper path");
+
+        assert_eq!(resolved_runner, runner_helper);
+        assert_eq!(resolved_setup, setup_helper);
     }
 
     #[test]
