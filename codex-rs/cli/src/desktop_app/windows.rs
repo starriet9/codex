@@ -6,6 +6,8 @@ use tokio::process::Command;
 const CODEX_WINDOWS_INSTALLER_URL: &str =
     "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi";
 const CODEX_MICROSOFT_STORE_WEB_URL: &str = "https://apps.microsoft.com/detail/9plm9xgg6vks";
+const CODEX_WINDOWS_PACKAGE_NAME: &str = "OpenAI.Codex";
+const CODEX_WINDOWS_PUBLISHER_ID: &str = "2p2nqsd0c76g0";
 
 pub async fn run_windows_app_open_or_install(
     workspace: PathBuf,
@@ -34,7 +36,7 @@ async fn codex_app_is_installed() -> anyhow::Result<bool> {
     let output = Command::new("powershell.exe")
         .arg("-NoProfile")
         .arg("-Command")
-        .arg("Get-StartApps -Name 'Codex' | Select-Object -First 1 -ExpandProperty AppID")
+        .arg(codex_app_install_check_script())
         .output()
         .await
         .context("failed to invoke `powershell.exe`")?;
@@ -44,6 +46,14 @@ async fn codex_app_is_installed() -> anyhow::Result<bool> {
     }
 
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+fn codex_app_install_check_script() -> String {
+    format!(
+        "Get-AppxPackage -Name '{CODEX_WINDOWS_PACKAGE_NAME}' -ErrorAction SilentlyContinue \
+         | Where-Object {{ $_.PublisherId -eq '{CODEX_WINDOWS_PUBLISHER_ID}' }} \
+         | Select-Object -First 1 -ExpandProperty PackageFullName"
+    )
 }
 
 async fn open_url(url: &str) -> anyhow::Result<()> {
@@ -83,6 +93,7 @@ fn display_workspace_path(workspace: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::codex_app_install_check_script;
     use super::codex_new_thread_url;
     use super::display_workspace_path;
     use pretty_assertions::assert_eq;
@@ -126,5 +137,14 @@ mod tests {
             codex_new_thread_url(r"\\?\C:\Users\akuma\repos\koba"),
             r"codex://threads/new?path=%5C%5C%3F%5CC%3A%5CUsers%5Cakuma%5Crepos%5Ckoba"
         );
+    }
+
+    #[test]
+    fn install_check_uses_package_identity_instead_of_display_name() {
+        let script = codex_app_install_check_script();
+        assert!(script.contains("Get-AppxPackage -Name 'OpenAI.Codex'"));
+        assert!(script.contains("PublisherId -eq '2p2nqsd0c76g0'"));
+        assert!(!script.contains("Get-StartApps"));
+        assert!(!script.contains("ChatGPT"));
     }
 }
