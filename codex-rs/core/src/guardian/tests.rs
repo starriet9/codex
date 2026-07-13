@@ -2280,7 +2280,7 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> anyhow::Result<()> {
+async fn guardian_review_surfaces_responses_api_errors_as_review_failures() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -2341,14 +2341,18 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     assert_eq!(request_log.requests().len(), 1);
 
     let mut warnings = Vec::new();
-    let mut denial_rationales = Vec::new();
+    let mut failure_assessments = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event.msg {
             EventMsg::GuardianWarning(event) => warnings.push(event.message),
             EventMsg::GuardianAssessment(event)
-                if event.status == GuardianAssessmentStatus::Denied =>
+                if event.status == GuardianAssessmentStatus::Failed =>
             {
-                denial_rationales.push(event.rationale)
+                failure_assessments.push((
+                    event.risk_level,
+                    event.user_authorization,
+                    event.rationale,
+                ))
             }
             _ => {}
         }
@@ -2361,17 +2365,26 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
         "warning should include the underlying responses api error"
     );
     assert!(
-        denial_rationales
+        failure_assessments
             .iter()
-            .flatten()
-            .any(|message| message.contains(error_message)),
-        "denial rationale should include the underlying responses api error"
+            .filter_map(|(_, _, rationale)| rationale.as_ref())
+            .any(|rationale| rationale.contains(error_message)),
+        "failure rationale should include the underlying responses api error"
     );
     assert!(
-        denial_rationales.iter().flatten().all(|message| {
-            !message.contains("guardian review completed without an assessment payload")
-        }),
-        "denial rationale should not fall back to the generic missing payload error"
+        failure_assessments
+            .iter()
+            .all(|(risk, authorization, _)| { risk.is_none() && authorization.is_none() }),
+        "review failures must not fabricate risk or authorization assessments"
+    );
+    assert!(
+        failure_assessments
+            .iter()
+            .filter_map(|(_, _, rationale)| rationale.as_ref())
+            .all(|rationale| {
+                !rationale.contains("guardian review completed without an assessment payload")
+            }),
+        "failure rationale should not fall back to the generic missing payload error"
     );
     {
         let rationales = session.services.guardian_rejections.lock().await;
@@ -2381,9 +2394,13 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     let rejection_message =
         guardian_rejection_message(session.as_ref(), "review-shell-guardian-error").await;
     assert!(
-        rejection_message.contains("Reason: Automatic approval review failed:")
+        rejection_message.contains("blocked because automatic permission approval review failed")
             && rejection_message.contains(error_message),
-        "rejection message should include guardian rationale: {rejection_message}"
+        "rejection message should explain the review failure: {rejection_message}"
+    );
+    assert!(
+        !rejection_message.contains("unacceptable risk"),
+        "review failure must not be described as a risk denial: {rejection_message}"
     );
 
     Ok(())
@@ -2586,7 +2603,7 @@ async fn guardian_review_exhausts_three_failures_with_one_terminal_event() -> an
         statuses,
         vec![
             GuardianAssessmentStatus::InProgress,
-            GuardianAssessmentStatus::Denied,
+            GuardianAssessmentStatus::Failed,
         ]
     );
     Ok(())

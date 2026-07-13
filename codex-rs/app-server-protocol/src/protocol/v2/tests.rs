@@ -2397,6 +2397,26 @@ fn automatic_approval_review_deserializes_aborted_status() {
 }
 
 #[test]
+fn automatic_approval_review_deserializes_failed_status_without_assessment_fields() {
+    let review: GuardianApprovalReview = serde_json::from_value(json!({
+        "status": "failed",
+        "riskLevel": null,
+        "userAuthorization": null,
+        "rationale": "Automatic approval review failed: reviewer unavailable"
+    }))
+    .expect("failed automatic review should deserialize");
+    assert_eq!(
+        review,
+        GuardianApprovalReview {
+            status: GuardianApprovalReviewStatus::Failed,
+            risk_level: None,
+            user_authorization: None,
+            rationale: Some("Automatic approval review failed: reviewer unavailable".to_string()),
+        }
+    );
+}
+
+#[test]
 fn guardian_approval_review_action_round_trips_command_shape() {
     let value = json!({
         "type": "command",

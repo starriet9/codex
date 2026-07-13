@@ -1934,6 +1934,7 @@
         "inProgress",
         "approved",
         "denied",
+        "failed",
         "timedOut",
         "aborted"
       ],

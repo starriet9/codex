@@ -37,6 +37,7 @@ use super::GuardianAssessment;
 use super::GuardianAssessmentOutcome;
 use super::GuardianRejection;
 use super::GuardianRejectionCircuitBreakerAction;
+use super::GuardianRejectionKind;
 use super::approval_request::guardian_assessment_action;
 use super::approval_request::guardian_request_target_item_id;
 use super::approval_request::guardian_request_turn_id;
@@ -62,6 +63,12 @@ const GUARDIAN_TIMEOUT_INSTRUCTIONS: &str = concat!(
     "You may retry once, or ask the user for guidance or explicit approval.",
 );
 
+const GUARDIAN_REVIEW_FAILED_INSTRUCTIONS: &str = concat!(
+    "The automatic permission approval review did not produce a risk decision. ",
+    "The action was blocked as a safety precaution. ",
+    "You may retry once, or ask the user for guidance or explicit approval.",
+);
+
 const GUARDIAN_REVIEW_MAX_ATTEMPTS: i64 = 3;
 
 pub(crate) fn new_guardian_review_id() -> String {
@@ -79,12 +86,20 @@ pub(crate) async fn guardian_rejection_message(session: &Session, review_id: &st
         .unwrap_or_else(|| GuardianRejection {
             rationale: "Auto-reviewer denied the action without a specific rationale.".to_string(),
             source: GuardianAssessmentDecisionSource::Agent,
+            kind: GuardianRejectionKind::AssessmentDenied,
         });
-    match rejection.source {
-        GuardianAssessmentDecisionSource::Agent => format!(
-            "This action was rejected due to unacceptable risk.\nReason: {}\n{}",
+    match (rejection.source, rejection.kind) {
+        (GuardianAssessmentDecisionSource::Agent, GuardianRejectionKind::AssessmentDenied) => {
+            format!(
+                "This action was rejected due to unacceptable risk.\nReason: {}\n{}",
+                rejection.rationale.trim(),
+                GUARDIAN_REJECTION_INSTRUCTIONS
+            )
+        }
+        (GuardianAssessmentDecisionSource::Agent, GuardianRejectionKind::ReviewFailed) => format!(
+            "This action was blocked because automatic permission approval review failed.\nReason: {}\n{}",
             rejection.rationale.trim(),
-            GUARDIAN_REJECTION_INSTRUCTIONS
+            GUARDIAN_REVIEW_FAILED_INSTRUCTIONS
         ),
     }
 }
@@ -497,7 +512,8 @@ async fn run_guardian_review(
                         "guardian review failed"
                     }
                 };
-                let rationale = format!("Automatic approval review failed: {message}");
+                let failure_message = message.to_string();
+                let rationale = format!("Automatic approval review failed: {failure_message}");
                 track_guardian_review(
                     session.as_ref(),
                     &review_tracking,
@@ -511,15 +527,47 @@ async fn run_guardian_review(
                     },
                     completed_at_ms.try_into().unwrap_or_default(),
                 );
-                (
-                    GuardianAssessment {
-                        risk_level: GuardianRiskLevel::High,
-                        user_authorization: GuardianUserAuthorization::Unknown,
-                        outcome: GuardianAssessmentOutcome::Deny,
-                        rationale,
-                    },
-                    false,
-                )
+                session
+                    .send_event(
+                        turn.as_ref(),
+                        EventMsg::GuardianWarning(WarningEvent {
+                            message: format!(
+                                "Automatic approval review failed; the action was blocked because no risk decision was available: {failure_message}"
+                            ),
+                        }),
+                    )
+                    .await;
+                {
+                    let mut rejections = session.services.guardian_rejections.lock().await;
+                    rejections.insert(
+                        review_id.clone(),
+                        GuardianRejection {
+                            rationale: failure_message,
+                            source: GuardianAssessmentDecisionSource::Agent,
+                            kind: GuardianRejectionKind::ReviewFailed,
+                        },
+                    );
+                }
+                session
+                    .send_event(
+                        turn.as_ref(),
+                        EventMsg::GuardianAssessment(GuardianAssessmentEvent {
+                            id: review_id,
+                            target_item_id,
+                            turn_id: assessment_turn_id.clone(),
+                            started_at_ms,
+                            completed_at_ms: Some(completed_at_ms),
+                            status: GuardianAssessmentStatus::Failed,
+                            risk_level: None,
+                            user_authorization: None,
+                            rationale: Some(rationale),
+                            decision_source: Some(GuardianAssessmentDecisionSource::Agent),
+                            action: terminal_action,
+                        }),
+                    )
+                    .await;
+                record_guardian_non_denial(&session, &assessment_turn_id).await;
+                return ReviewDecision::Denied;
             }
         },
     };
@@ -559,6 +607,7 @@ async fn run_guardian_review(
             let rejection = GuardianRejection {
                 rationale: assessment.rationale.clone(),
                 source: GuardianAssessmentDecisionSource::Agent,
+                kind: GuardianRejectionKind::AssessmentDenied,
             };
             rationales.insert(review_id.clone(), rejection);
         }

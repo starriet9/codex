@@ -448,6 +448,7 @@ pub enum GuardianApprovalReviewStatus {
     InProgress,
     Approved,
     Denied,
+    Failed,
     TimedOut,
     Aborted,
 }

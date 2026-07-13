@@ -579,6 +579,7 @@ pub(crate) enum ReviewTrigger {
 pub(crate) enum ReviewStatus {
     Approved,
     Denied,
+    Failed,
     Aborted,
     TimedOut,
 }

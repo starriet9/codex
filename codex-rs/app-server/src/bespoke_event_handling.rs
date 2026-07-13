@@ -298,6 +298,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 codex_protocol::protocol::GuardianAssessmentStatus::TimedOut => {
                     Some(CommandExecutionStatus::Failed)
                 }
+                codex_protocol::protocol::GuardianAssessmentStatus::Failed => {
+                    Some(CommandExecutionStatus::Failed)
+                }
                 codex_protocol::protocol::GuardianAssessmentStatus::InProgress
                 | codex_protocol::protocol::GuardianAssessmentStatus::Approved => None,
             };
@@ -2237,6 +2240,7 @@ mod tests {
                 Some(codex_protocol::protocol::GuardianUserAuthorization::Low),
                 Some("too risky".to_string()),
             ),
+            GuardianAssessmentStatus::Failed => (None, None, Some("review failed".to_string())),
             GuardianAssessmentStatus::TimedOut => {
                 (None, None, Some("review timed out".to_string()))
             }
@@ -2392,6 +2396,50 @@ mod tests {
                 );
                 assert_eq!(payload.review.rationale.as_deref(), Some("too risky"));
                 assert_eq!(payload.action, action.into());
+            }
+            other => panic!("unexpected notification: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guardian_assessment_failed_emits_review_payload_without_assessment_fields() {
+        let conversation_id = ThreadId::new();
+        let action = codex_protocol::protocol::GuardianAssessmentAction::Command {
+            source: codex_protocol::protocol::GuardianCommandSource::Shell,
+            command: "git push".to_string(),
+            cwd: test_path_buf("/repo").abs(),
+        };
+        let notification = guardian_auto_approval_review_notification(
+            &conversation_id,
+            "turn-from-event",
+            &GuardianAssessmentEvent {
+                id: "review-failed".to_string(),
+                target_item_id: Some("item-failed".to_string()),
+                turn_id: "turn-from-assessment".to_string(),
+                started_at_ms: 1_000,
+                completed_at_ms: Some(1_042),
+                status: codex_protocol::protocol::GuardianAssessmentStatus::Failed,
+                risk_level: None,
+                user_authorization: None,
+                rationale: Some(
+                    "Automatic approval review failed: reviewer unavailable".to_string(),
+                ),
+                decision_source: Some(
+                    codex_protocol::protocol::GuardianAssessmentDecisionSource::Agent,
+                ),
+                action,
+            },
+        );
+
+        match notification {
+            ServerNotification::ItemGuardianApprovalReviewCompleted(payload) => {
+                assert_eq!(payload.review.status, GuardianApprovalReviewStatus::Failed);
+                assert_eq!(payload.review.risk_level, None);
+                assert_eq!(payload.review.user_authorization, None);
+                assert_eq!(
+                    payload.review.rationale.as_deref(),
+                    Some("Automatic approval review failed: reviewer unavailable")
+                );
             }
             other => panic!("unexpected notification: {other:?}"),
         }

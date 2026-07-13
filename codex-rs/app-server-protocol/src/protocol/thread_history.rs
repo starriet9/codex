@@ -668,7 +668,9 @@ impl ThreadHistoryBuilder {
             GuardianAssessmentStatus::Denied | GuardianAssessmentStatus::Aborted => {
                 CommandExecutionStatus::Declined
             }
-            GuardianAssessmentStatus::TimedOut => CommandExecutionStatus::Failed,
+            GuardianAssessmentStatus::Failed | GuardianAssessmentStatus::TimedOut => {
+                CommandExecutionStatus::Failed
+            }
             GuardianAssessmentStatus::Approved => return,
         };
         let Some(item) = build_item_from_guardian_event(payload, status) else {

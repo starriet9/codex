@@ -2259,6 +2259,9 @@ fn guardian_review_result(
         GuardianApprovalReviewStatus::Denied => {
             Some((ReviewStatus::Denied, ReviewResolution::None))
         }
+        GuardianApprovalReviewStatus::Failed => {
+            Some((ReviewStatus::Failed, ReviewResolution::None))
+        }
         GuardianApprovalReviewStatus::TimedOut => {
             Some((ReviewStatus::TimedOut, ReviewResolution::None))
         }
@@ -2840,6 +2843,10 @@ mod tests {
         assert!(matches!(
             guardian_review_result(GuardianApprovalReviewStatus::TimedOut),
             Some((ReviewStatus::TimedOut, ReviewResolution::None))
+        ));
+        assert!(matches!(
+            guardian_review_result(GuardianApprovalReviewStatus::Failed),
+            Some((ReviewStatus::Failed, ReviewResolution::None))
         ));
     }
 }

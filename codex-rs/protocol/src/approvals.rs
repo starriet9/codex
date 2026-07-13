@@ -114,6 +114,7 @@ pub enum GuardianAssessmentStatus {
     InProgress,
     Approved,
     Denied,
+    Failed,
     TimedOut,
     Aborted,
 }
@@ -194,11 +195,12 @@ pub struct GuardianAssessmentEvent {
     #[ts(optional, type = "number")]
     pub completed_at_ms: Option<i64>,
     pub status: GuardianAssessmentStatus,
-    /// Coarse risk label. Omitted while the assessment is in progress.
+    /// Coarse risk label. Omitted until a reviewer produces an assessment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub risk_level: Option<GuardianRiskLevel>,
-    /// How directly the transcript authorizes the reviewed action.
+    /// How directly the transcript authorizes the reviewed action. Omitted
+    /// until a reviewer produces an assessment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub user_authorization: Option<GuardianUserAuthorization>,
