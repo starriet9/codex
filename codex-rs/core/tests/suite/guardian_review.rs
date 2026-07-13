@@ -6,6 +6,7 @@ use codex_core::sandboxing::SandboxPermissions;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::user_input::UserInput;
@@ -16,6 +17,7 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_failed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::responses::start_websocket_server;
 use core_test_support::skip_if_no_network;
@@ -221,6 +223,149 @@ async fn guardian_denial_rejects_tool_call_with_rationale() -> Result<()> {
     assert!(
         !output_file.exists(),
         "Guardian-denied command unexpectedly executed"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_review_failure_blocks_tool_call_without_fabricating_risk_denial() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "Guardian approval actions require host-native paths"
+    );
+
+    let server = start_mock_server().await;
+    let approval_policy = AskForApproval::OnRequest;
+    let sandbox_policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![],
+        network_access: false,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+    let sandbox_policy_for_config = sandbox_policy.clone();
+
+    let mut builder = test_codex().with_config(move |config| {
+        config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+        config
+            .set_legacy_sandbox_policy(sandbox_policy_for_config)
+            .expect("set sandbox policy");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let output_file = test.cwd.path().join("guardian-review-failed.txt");
+    let command = format!("printf should-not-run > {}", output_file.display());
+    let tool_args = json!({
+        "cmd": command,
+        "yield_time_ms": 1_000_u64,
+        "sandbox_permissions": SandboxPermissions::RequireEscalated,
+        "justification": "Exercise Guardian review failure routing.",
+    });
+    let capacity_error = "Selected model is at capacity. Please try a different model.";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-parent-tool-review-failed"),
+                ev_function_call(
+                    "exec-call-review-failed",
+                    "exec_command",
+                    &serde_json::to_string(&tool_args)?,
+                ),
+                ev_completed("resp-parent-tool-review-failed"),
+            ]),
+            sse_failed(
+                "resp-guardian-review-failed-1",
+                "server_is_overloaded",
+                capacity_error,
+            ),
+            sse_failed(
+                "resp-guardian-review-failed-2",
+                "server_is_overloaded",
+                capacity_error,
+            ),
+            sse_failed(
+                "resp-guardian-review-failed-3",
+                "server_is_overloaded",
+                capacity_error,
+            ),
+            sse(vec![
+                ev_response_created("resp-parent-after-review-failed"),
+                ev_assistant_message("msg-parent-after-review-failed", "review failed"),
+                ev_completed("resp-parent-after-review-failed"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "run a command whose Guardian review will fail".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                approval_policy: Some(approval_policy),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                sandbox_policy: Some(sandbox_policy),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let mut assessments = Vec::new();
+    let mut warnings = Vec::new();
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::GuardianAssessment(event) => assessments.push(event),
+            EventMsg::GuardianWarning(event) => warnings.push(event.message),
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        assessments
+            .iter()
+            .map(|event| event.status)
+            .collect::<Vec<_>>(),
+        vec![
+            GuardianAssessmentStatus::InProgress,
+            GuardianAssessmentStatus::Failed,
+        ]
+    );
+    let terminal_assessment = assessments.last().expect("terminal Guardian assessment");
+    assert_eq!(terminal_assessment.risk_level, None);
+    assert_eq!(terminal_assessment.user_authorization, None);
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.contains("no risk decision was available") && warning.contains(capacity_error)
+        }),
+        "expected review failure warning, got: {warnings:?}"
+    );
+
+    let requests = responses.requests();
+    let tool_output = requests
+        .iter()
+        .find_map(|request| request.function_call_output_text("exec-call-review-failed"))
+        .expect("expected blocked tool output to be returned to the parent model");
+    assert!(
+        tool_output.contains("blocked because automatic permission approval review failed")
+            && tool_output.contains(capacity_error),
+        "review failure missing from blocked tool output: {tool_output}"
+    );
+    assert!(
+        !tool_output.contains("unacceptable risk"),
+        "review failure must not be described as a risk denial: {tool_output}"
+    );
+    assert!(
+        !output_file.exists(),
+        "blocked command unexpectedly executed"
     );
 
     Ok(())
