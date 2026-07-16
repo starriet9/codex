@@ -65,6 +65,19 @@ fn streaming_agent_tail_blank_line_uses_one_viewport_row() {
     assert_eq!(cell.desired_height(/*width*/ 80), 3);
 }
 
+#[test]
+fn finalized_agent_blank_line_uses_one_viewport_row() {
+    let cell = AgentMarkdownCell::new("first\n\nsecond".to_string(), &test_cwd());
+
+    let lines = cell.display_lines(/*width*/ 80);
+    insta::assert_snapshot!(render_lines(&lines).join("\n"), @"
+• first
+
+  second
+");
+    assert_eq!(cell.desired_transcript_height(/*width*/ 80), 3);
+}
+
 fn stdio_server_config(
     command: &str,
     args: Vec<&str>,
