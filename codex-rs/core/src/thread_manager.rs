@@ -744,6 +744,27 @@ impl ThreadManager {
         subtree_thread_ids.push(thread_id);
         seen_thread_ids.insert(thread_id);
 
+        match self
+            .state
+            .thread_store
+            .list_owned_descendant_thread_ids(thread_id)
+            .await
+        {
+            Ok(descendant_ids) => {
+                for descendant_id in descendant_ids {
+                    if seen_thread_ids.insert(descendant_id) {
+                        subtree_thread_ids.push(descendant_id);
+                    }
+                }
+            }
+            Err(ThreadStoreError::Unsupported { .. }) => {}
+            Err(err) => {
+                return Err(CodexErr::Fatal(format!(
+                    "failed to load owned thread descendants: {err}"
+                )));
+            }
+        }
+
         if let Some(agent_graph_store) = self.state.agent_graph_store() {
             for descendant_id in agent_graph_store
                 .list_thread_spawn_descendants(thread_id, /*status_filter*/ None)

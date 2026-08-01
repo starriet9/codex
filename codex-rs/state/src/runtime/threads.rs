@@ -17,6 +17,8 @@ SELECT
     threads.source,
     threads.history_mode,
     threads.thread_source,
+    threads.parent_thread_id,
+    threads.parent_thread_id_known,
     threads.agent_nickname,
     threads.agent_role,
     threads.agent_path,
@@ -167,6 +169,94 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
     ) -> anyhow::Result<Vec<ThreadId>> {
         self.list_thread_spawn_descendants_matching(root_thread_id, /*status*/ None)
             .await
+    }
+
+    /// List persisted descendants using the parent relation from rollout metadata.
+    pub async fn list_thread_parent_descendants(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> anyhow::Result<Vec<ThreadId>> {
+        let root_thread_id = root_thread_id.to_string();
+        let rows = sqlx::query(
+            r#"
+WITH RECURSIVE subtree(child_thread_id, depth, path) AS (
+    SELECT id, 1, ',' || ? || ',' || id || ','
+    FROM threads
+    WHERE parent_thread_id = ?
+    UNION ALL
+    SELECT child.id, subtree.depth + 1, subtree.path || child.id || ','
+    FROM threads AS child
+    JOIN subtree ON child.parent_thread_id = subtree.child_thread_id
+    WHERE instr(subtree.path, ',' || child.id || ',') = 0
+)
+SELECT child_thread_id
+FROM subtree
+GROUP BY child_thread_id
+ORDER BY MIN(depth) ASC, child_thread_id ASC
+            "#,
+        )
+        .bind(root_thread_id.as_str())
+        .bind(root_thread_id.as_str())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?).map_err(Into::into)
+            })
+            .collect()
+    }
+
+    /// List subagent rows whose rollout parent relation has not been indexed yet.
+    pub async fn list_threads_with_unknown_parent_relation(
+        &self,
+    ) -> anyhow::Result<Vec<(ThreadId, PathBuf, String)>> {
+        let rows = sqlx::query(
+            r#"
+SELECT id, rollout_path, source
+FROM threads
+WHERE parent_thread_id_known = 0
+  AND thread_source = ?
+ORDER BY id
+            "#,
+        )
+        .bind(codex_protocol::protocol::ThreadSource::Subagent.as_str())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    ThreadId::try_from(row.try_get::<String, _>("id")?)?,
+                    PathBuf::from(row.try_get::<String, _>("rollout_path")?),
+                    row.try_get::<String, _>("source")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Persist resolved rollout parent relationships in one transaction.
+    pub async fn resolve_thread_parent_relations(
+        &self,
+        relations: &[(ThreadId, Option<ThreadId>)],
+    ) -> anyhow::Result<()> {
+        if relations.is_empty() {
+            return Ok(());
+        }
+        let mut transaction = self.pool.begin().await?;
+        for (thread_id, parent_thread_id) in relations {
+            sqlx::query(
+                r#"
+UPDATE threads
+SET parent_thread_id = ?, parent_thread_id_known = 1
+WHERE id = ?
+                "#,
+            )
+            .bind(parent_thread_id.map(|id| id.to_string()))
+            .bind(thread_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
@@ -564,6 +654,8 @@ INSERT INTO threads (
     source,
     history_mode,
     thread_source,
+    parent_thread_id,
+    parent_thread_id_known,
     agent_nickname,
     agent_role,
     agent_path,
@@ -588,7 +680,7 @@ INSERT INTO threads (
     git_branch,
     git_origin_url,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -608,6 +700,8 @@ ON CONFLICT(id) DO NOTHING
                 .as_ref()
                 .map(codex_protocol::protocol::ThreadSource::as_str),
         )
+        .bind(metadata.parent_thread_id.map(|id| id.to_string()))
+        .bind(metadata.parent_thread_id_known)
         .bind(metadata.agent_nickname.as_deref())
         .bind(metadata.agent_role.as_deref())
         .bind(metadata.agent_path.as_deref())
@@ -839,6 +933,8 @@ INSERT INTO threads (
     source,
     history_mode,
     thread_source,
+    parent_thread_id,
+    parent_thread_id_known,
     agent_nickname,
     agent_role,
     agent_path,
@@ -863,7 +959,7 @@ INSERT INTO threads (
     git_branch,
     git_origin_url,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -875,6 +971,14 @@ ON CONFLICT(id) DO UPDATE SET
     source = excluded.source,
     history_mode = excluded.history_mode,
     thread_source = excluded.thread_source,
+    parent_thread_id = CASE
+        WHEN excluded.parent_thread_id_known THEN excluded.parent_thread_id
+        ELSE threads.parent_thread_id
+    END,
+    parent_thread_id_known = MAX(
+        threads.parent_thread_id_known,
+        excluded.parent_thread_id_known
+    ),
     agent_nickname = excluded.agent_nickname,
     agent_role = excluded.agent_role,
     agent_path = excluded.agent_path,
@@ -912,6 +1016,8 @@ ON CONFLICT(id) DO UPDATE SET
                 .as_ref()
                 .map(codex_protocol::protocol::ThreadSource::as_str),
         )
+        .bind(metadata.parent_thread_id.map(|id| id.to_string()))
+        .bind(metadata.parent_thread_id_known)
         .bind(metadata.agent_nickname.as_deref())
         .bind(metadata.agent_role.as_deref())
         .bind(metadata.agent_path.as_deref())
@@ -1210,6 +1316,8 @@ SELECT
     threads.source,
     threads.history_mode,
     threads.thread_source,
+    threads.parent_thread_id,
+    threads.parent_thread_id_known,
     threads.agent_nickname,
     threads.agent_role,
     threads.agent_path,
@@ -1463,7 +1571,9 @@ mod tests {
     use codex_protocol::protocol::SessionMeta;
     use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SubAgentSource;
     use codex_protocol::protocol::ThreadHistoryMode;
+    use codex_protocol::protocol::ThreadSource;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
@@ -1535,6 +1645,75 @@ mod tests {
             .expect("thread should load")
             .expect("thread should exist");
         assert_eq!(metadata.history_mode, ThreadHistoryMode::Paginated);
+    }
+
+    #[tokio::test]
+    async fn parent_relations_resolve_and_list_descendants() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let parent_thread_id = ThreadId::new();
+        let child_thread_id = ThreadId::new();
+        let grandchild_thread_id = ThreadId::new();
+
+        let mut child = test_thread_metadata(&codex_home, child_thread_id, codex_home.clone());
+        child.source = crate::extract::enum_to_string(&SessionSource::SubAgent(
+            SubAgentSource::Other("guardian".to_string()),
+        ));
+        child.thread_source = Some(ThreadSource::Subagent);
+        child.parent_thread_id = None;
+        child.parent_thread_id_known = false;
+        runtime
+            .upsert_thread(&child)
+            .await
+            .expect("child should insert");
+
+        let mut grandchild =
+            test_thread_metadata(&codex_home, grandchild_thread_id, codex_home.clone());
+        grandchild.thread_source = Some(ThreadSource::Subagent);
+        grandchild.parent_thread_id = Some(child_thread_id);
+        grandchild.parent_thread_id_known = true;
+        runtime
+            .upsert_thread(&grandchild)
+            .await
+            .expect("grandchild should insert");
+
+        assert_eq!(
+            runtime
+                .list_threads_with_unknown_parent_relation()
+                .await
+                .expect("unresolved relations should load"),
+            vec![(
+                child_thread_id,
+                child.rollout_path.clone(),
+                child.source.clone(),
+            )]
+        );
+        runtime
+            .resolve_thread_parent_relations(&[(child_thread_id, Some(parent_thread_id))])
+            .await
+            .expect("child parent should resolve");
+
+        assert_eq!(
+            runtime
+                .get_thread(child_thread_id)
+                .await
+                .expect("child should load")
+                .expect("child should exist")
+                .parent_thread_id,
+            Some(parent_thread_id)
+        );
+        assert_eq!(
+            runtime
+                .list_thread_parent_descendants(parent_thread_id)
+                .await
+                .expect("descendants should load"),
+            vec![child_thread_id, grandchild_thread_id]
+        );
     }
 
     #[tokio::test]

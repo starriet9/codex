@@ -114,6 +114,10 @@ pub struct ThreadMetadata {
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
+    /// Parent thread recorded in the rollout session metadata, if any.
+    pub parent_thread_id: Option<ThreadId>,
+    /// Whether the rollout's parent relationship has been inspected.
+    pub parent_thread_id_known: bool,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     pub agent_nickname: Option<String>,
     /// Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.
@@ -179,6 +183,10 @@ pub struct ThreadMetadataBuilder {
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
+    /// Parent thread recorded in the rollout session metadata, if any.
+    pub parent_thread_id: Option<ThreadId>,
+    /// Whether the rollout's parent relationship has been inspected.
+    pub parent_thread_id_known: bool,
     /// Optional random unique nickname assigned to the session.
     pub agent_nickname: Option<String>,
     /// Optional role (agent_role) assigned to the session.
@@ -222,6 +230,8 @@ impl ThreadMetadataBuilder {
             source,
             history_mode: ThreadHistoryMode::Legacy,
             thread_source: None,
+            parent_thread_id: None,
+            parent_thread_id_known: false,
             agent_nickname: None,
             agent_role: None,
             agent_path: None,
@@ -260,6 +270,8 @@ impl ThreadMetadataBuilder {
             source,
             history_mode: self.history_mode,
             thread_source: self.thread_source.clone(),
+            parent_thread_id: self.parent_thread_id,
+            parent_thread_id_known: self.parent_thread_id_known,
             agent_nickname: self.agent_nickname.clone(),
             agent_role: self.agent_role.clone(),
             agent_path: self
@@ -351,6 +363,12 @@ impl ThreadMetadata {
         if self.source != other.source {
             diffs.push("source");
         }
+        if self.parent_thread_id != other.parent_thread_id {
+            diffs.push("parent_thread_id");
+        }
+        if self.parent_thread_id_known != other.parent_thread_id_known {
+            diffs.push("parent_thread_id_known");
+        }
         if self.agent_nickname != other.agent_nickname {
             diffs.push("agent_nickname");
         }
@@ -435,6 +453,8 @@ pub(crate) struct ThreadRow {
     source: String,
     history_mode: String,
     thread_source: Option<String>,
+    parent_thread_id: Option<String>,
+    parent_thread_id_known: bool,
     agent_nickname: Option<String>,
     agent_role: Option<String>,
     agent_path: Option<String>,
@@ -471,6 +491,8 @@ impl ThreadRow {
             source: row.try_get("source")?,
             history_mode: row.try_get("history_mode")?,
             thread_source: row.try_get("thread_source")?,
+            parent_thread_id: row.try_get("parent_thread_id")?,
+            parent_thread_id_known: row.try_get("parent_thread_id_known")?,
             agent_nickname: row.try_get("agent_nickname")?,
             agent_role: row.try_get("agent_role")?,
             agent_path: row.try_get("agent_path")?,
@@ -511,6 +533,8 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             source,
             history_mode,
             thread_source,
+            parent_thread_id,
+            parent_thread_id_known,
             agent_nickname,
             agent_role,
             agent_path,
@@ -563,6 +587,8 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             source,
             history_mode,
             thread_source,
+            parent_thread_id: parent_thread_id.map(ThreadId::try_from).transpose()?,
+            parent_thread_id_known,
             agent_nickname,
             agent_role,
             agent_path,
@@ -670,6 +696,8 @@ mod tests {
             source: "cli".to_string(),
             history_mode: "legacy".to_string(),
             thread_source: None,
+            parent_thread_id: None,
+            parent_thread_id_known: true,
             agent_nickname: None,
             agent_role: None,
             agent_path: None,
@@ -707,6 +735,8 @@ mod tests {
             source: "cli".to_string(),
             history_mode: ThreadHistoryMode::Legacy,
             thread_source: None,
+            parent_thread_id: None,
+            parent_thread_id_known: true,
             agent_nickname: None,
             agent_role: None,
             agent_path: None,

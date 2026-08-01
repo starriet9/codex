@@ -129,6 +129,21 @@ pub trait ThreadStore: Any + Send + Sync {
     /// Lists stored threads matching the supplied filters.
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage>;
 
+    /// Lists every persisted thread owned transitively by `root_thread_id`.
+    ///
+    /// This relationship comes from rollout `parent_thread_id` metadata and is distinct from the
+    /// lifecycle graph used for explicitly spawned agents.
+    fn list_owned_descendant_thread_ids(
+        &self,
+        _root_thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "list_owned_descendant_thread_ids",
+            })
+        })
+    }
+
     /// Whether this store can discover and manage independently persisted thread sections.
     fn supports_thread_sections(&self) -> bool {
         false

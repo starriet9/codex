@@ -7,6 +7,7 @@ mod live_writer;
 mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
+mod parent_relations;
 mod read_thread;
 // This lands before the reader PRs that consume the shared lineage resolver.
 #[allow(dead_code)]
@@ -441,6 +442,15 @@ impl ThreadStore for LocalThreadStore {
 
     fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
         Box::pin(async move { list_threads::list_threads(self, params).await })
+    }
+
+    fn list_owned_descendant_thread_ids(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async move {
+            parent_relations::list_owned_descendant_thread_ids(self, root_thread_id).await
+        })
     }
 
     fn supports_thread_sections(&self) -> bool {

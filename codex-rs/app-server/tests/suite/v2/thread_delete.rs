@@ -19,9 +19,13 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_core::find_thread_path_by_id_str;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadSource;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_state::SqliteConfig;
 use codex_state::StateRuntime;
+use codex_state::ThreadMetadataBuilder;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use std::path::Path;
@@ -166,6 +170,112 @@ async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
             .await?,
         Vec::<ThreadId>::new()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_delete_backfills_and_deletes_guardian_descendants() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let parent_id = create_delete_test_rollout(codex_home.path(), /*minute*/ 0, "parent")?;
+    let guardian_id = create_delete_test_rollout(codex_home.path(), /*minute*/ 1, "guardian")?;
+    let parent_thread_id = ThreadId::from_string(&parent_id)?;
+    let guardian_thread_id = ThreadId::from_string(&guardian_id)?;
+    let parent_path = find_thread_path_by_id_str(
+        codex_home.path(),
+        parent_id.as_str(),
+        /*state_db_ctx*/ None,
+    )
+    .await?
+    .expect("parent rollout path");
+    let guardian_path = find_thread_path_by_id_str(
+        codex_home.path(),
+        guardian_id.as_str(),
+        /*state_db_ctx*/ None,
+    )
+    .await?
+    .expect("guardian rollout path");
+
+    let mut guardian_meta: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(guardian_path.as_path())?
+            .lines()
+            .next()
+            .expect("guardian session metadata"),
+    )?;
+    guardian_meta["payload"]["parent_thread_id"] = serde_json::to_value(parent_thread_id)?;
+    guardian_meta["payload"]["source"] = serde_json::json!({
+        "subagent": { "other": "guardian" }
+    });
+    guardian_meta["payload"]["thread_source"] = serde_json::json!("subagent");
+    std::fs::write(guardian_path.as_path(), format!("{guardian_meta}\n"))?;
+
+    let state_db = StateRuntime::init(
+        SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
+    let mut parent_builder = ThreadMetadataBuilder::new(
+        parent_thread_id,
+        parent_path,
+        chrono::Utc::now(),
+        SessionSource::Cli,
+    );
+    parent_builder.model_provider = Some("mock_provider".to_string());
+    parent_builder.parent_thread_id_known = true;
+    state_db
+        .upsert_thread(&parent_builder.build("mock_provider"))
+        .await?;
+
+    let mut guardian_builder = ThreadMetadataBuilder::new(
+        guardian_thread_id,
+        guardian_path,
+        chrono::Utc::now(),
+        SessionSource::SubAgent(SubAgentSource::Other("guardian".to_string())),
+    );
+    guardian_builder.model_provider = Some("mock_provider".to_string());
+    guardian_builder.thread_source = Some(ThreadSource::Subagent);
+    let guardian_metadata = guardian_builder.build("mock_provider");
+    assert_eq!(guardian_metadata.parent_thread_id_known, false);
+    state_db.upsert_thread(&guardian_metadata).await?;
+    state_db
+        .mark_backfill_complete(/*last_watermark*/ None)
+        .await?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let _: ThreadDeleteResponse = mcp
+        .request(|request_id| ClientRequest::ThreadDelete {
+            request_id,
+            params: ThreadDeleteParams {
+                thread_id: parent_id.clone(),
+            },
+        })
+        .await?;
+
+    let mut deleted_ids = Vec::new();
+    for _ in 0..2 {
+        let deleted_notification: ThreadDeletedNotification = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_notification("thread/deleted"),
+        )
+        .await??;
+        deleted_ids.push(deleted_notification.thread_id);
+    }
+    assert_eq!(deleted_ids, vec![guardian_id, parent_id]);
+    for thread_id in [parent_thread_id, guardian_thread_id] {
+        assert_eq!(
+            find_thread_path_by_id_str(
+                codex_home.path(),
+                &thread_id.to_string(),
+                /*state_db_ctx*/ None,
+            )
+            .await?,
+            None
+        );
+        assert_eq!(state_db.get_thread(thread_id).await?, None);
+    }
     Ok(())
 }
 

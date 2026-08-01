@@ -66,6 +66,8 @@ fn apply_session_meta_from_item(metadata: &mut ThreadMetadata, meta_line: &Sessi
     metadata.source = enum_to_string(&meta_line.meta.source);
     // Later SessionMeta lines do not redefine the canonical history_mode.
     metadata.thread_source = meta_line.meta.thread_source.clone();
+    metadata.parent_thread_id = meta_line.meta.parent_thread_id;
+    metadata.parent_thread_id_known = true;
     metadata.agent_nickname = meta_line.meta.agent_nickname.clone();
     metadata.agent_role = meta_line.meta.agent_role.clone();
     metadata.agent_path = meta_line.meta.agent_path.clone();
@@ -679,6 +681,8 @@ mod tests {
             source: "cli".to_string(),
             history_mode: Default::default(),
             thread_source: None,
+            parent_thread_id: None,
+            parent_thread_id_known: true,
             agent_path: None,
             agent_nickname: None,
             agent_role: None,

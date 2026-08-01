@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -919,6 +920,43 @@ impl ThreadStore for InMemoryThreadStore {
                 }
             }
             Ok(page)
+        })
+    }
+
+    fn list_owned_descendant_thread_ids(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async move {
+            let page = InMemoryThreadStore::list_threads(self).await?;
+            let mut children_by_parent = HashMap::<ThreadId, Vec<ThreadId>>::new();
+            for thread in page.items {
+                if let Some(parent_thread_id) = thread.parent_thread_id {
+                    children_by_parent
+                        .entry(parent_thread_id)
+                        .or_default()
+                        .push(thread.thread_id);
+                }
+            }
+            for children in children_by_parent.values_mut() {
+                children.sort_by_key(ToString::to_string);
+            }
+
+            let mut descendants = Vec::new();
+            let mut seen = HashSet::from([root_thread_id]);
+            let mut queue = VecDeque::from([root_thread_id]);
+            while let Some(parent_thread_id) = queue.pop_front() {
+                for child_thread_id in children_by_parent
+                    .remove(&parent_thread_id)
+                    .unwrap_or_default()
+                {
+                    if seen.insert(child_thread_id) {
+                        descendants.push(child_thread_id);
+                        queue.push_back(child_thread_id);
+                    }
+                }
+            }
+            Ok(descendants)
         })
     }
 

@@ -53,6 +53,8 @@ pub(super) fn test_thread_metadata(
         source: "cli".to_string(),
         history_mode: ThreadHistoryMode::Legacy,
         thread_source: None,
+        parent_thread_id: None,
+        parent_thread_id_known: true,
         agent_nickname: None,
         agent_role: None,
         agent_path: None,

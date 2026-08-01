@@ -47,6 +47,8 @@ pub(crate) fn builder_from_session_meta(
         session_meta.meta.source.clone(),
     );
     builder.history_mode = session_meta.meta.history_mode;
+    builder.parent_thread_id = session_meta.meta.parent_thread_id;
+    builder.parent_thread_id_known = true;
     builder.model_provider = session_meta.meta.model_provider.clone();
     builder.agent_nickname = session_meta.meta.agent_nickname.clone();
     builder.agent_role = session_meta.meta.agent_role.clone();
