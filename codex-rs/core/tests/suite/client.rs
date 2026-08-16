@@ -55,6 +55,7 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TokenUsage;
 use codex_protocol::user_input::UserInput;
 use core_test_support::TestCodexResponsesRequestKind;
 use core_test_support::apps_test_server::AppsTestServer;
@@ -3457,7 +3458,7 @@ async fn incomplete_response_emits_content_filter_error_message() -> anyhow::Res
 
     let TestCodex { codex, .. } = test_codex()
         .with_config(|config| {
-            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(2);
         })
         .build(&server)
         .await?;
@@ -3473,8 +3474,7 @@ async fn incomplete_response_emits_content_filter_error_message() -> anyhow::Res
         matches!(
             error_event,
             EventMsg::Error(ref err)
-                if err.message
-                    == "stream disconnected before completion: Incomplete response returned, reason: content_filter"
+                if err.message == "The model stopped before completing its response (reason: content_filter)."
         ),
         "expected incomplete content filter error; got {error_event:?}"
     );
@@ -3482,6 +3482,88 @@ async fn incomplete_response_emits_content_filter_error_message() -> anyhow::Res
     assert_eq!(responses_mock.requests().len(), 1);
 
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incomplete_max_output_is_not_retried_and_records_usage() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let token_usage = TokenUsage {
+        input_tokens: 120,
+        cached_input_tokens: 40,
+        cache_write_input_tokens: 10,
+        output_tokens: 30,
+        reasoning_output_tokens: 20,
+        total_tokens: 150,
+        codex_rollout_budget_units: None,
+    };
+    let incomplete_response = sse(vec![
+        ev_response_created("resp_incomplete"),
+        json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_incomplete",
+                "object": "response",
+                "status": "incomplete",
+                "error": null,
+                "incomplete_details": {
+                    "reason": "max_output_tokens"
+                },
+                "usage": {
+                    "input_tokens": token_usage.input_tokens,
+                    "input_tokens_details": {
+                        "cached_tokens": token_usage.cached_input_tokens,
+                        "cache_write_tokens": token_usage.cache_write_input_tokens
+                    },
+                    "output_tokens": token_usage.output_tokens,
+                    "output_tokens_details": {
+                        "reasoning_tokens": token_usage.reasoning_output_tokens
+                    },
+                    "total_tokens": token_usage.total_tokens
+                }
+            }
+        }),
+    ]);
+    let responses_mock = mount_sse_once(&server, incomplete_response).await;
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(|config| {
+            config.model_provider.stream_max_retries = Some(2);
+        })
+        .build(&server)
+        .await?;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "trigger max output".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let token_event = wait_for_event(&codex, |event| {
+        matches!(
+            event,
+            EventMsg::TokenCount(payload)
+                if payload.info.as_ref().is_some_and(|info| {
+                    info.last_token_usage == token_usage
+                })
+        )
+    })
+    .await;
+    assert!(matches!(token_event, EventMsg::TokenCount(_)));
+
+    let error_event = wait_for_event(&codex, |event| matches!(event, EventMsg::Error(_))).await;
+    assert!(
+        matches!(
+            error_event,
+            EventMsg::Error(ref err)
+                if err.message == "The model stopped before completing its response (reason: max_output_tokens)."
+        ),
+        "expected max output error; got {error_event:?}"
+    );
+    assert_eq!(responses_mock.requests().len(), 1);
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
     Ok(())
 }
 

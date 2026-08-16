@@ -1395,6 +1395,16 @@ async fn run_sampling_request(
                     }
                     return Err(err);
                 }
+                CodexErrorDetails::ResponseIncomplete { token_usage, .. } => {
+                    let token_usage = token_usage.clone();
+                    if let Some(token_usage) = token_usage.as_ref() {
+                        sess.update_token_usage_info(&turn_context, Some(token_usage))
+                            .await?;
+                    } else {
+                        sess.recompute_token_usage(&turn_context).await;
+                    }
+                    return Err(err);
+                }
                 _ => err,
             },
         };

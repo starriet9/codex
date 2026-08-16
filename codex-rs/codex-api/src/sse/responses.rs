@@ -451,15 +451,32 @@ pub fn process_responses_event(
             )));
         }
         "response.incomplete" => {
-            let reason = event.response.as_ref().and_then(|response| {
-                response
-                    .get("incomplete_details")
-                    .and_then(|details| details.get("reason"))
-                    .and_then(Value::as_str)
-            });
-            let reason = reason.unwrap_or("unknown");
-            let message = format!("Incomplete response returned, reason: {reason}");
-            return Err(ResponsesEventError::Api(ApiError::Stream(message)));
+            let reason = event
+                .response
+                .as_ref()
+                .and_then(|response| {
+                    response
+                        .get("incomplete_details")
+                        .and_then(|details| details.get("reason"))
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("unknown")
+                .to_string();
+            let token_usage = event
+                .response
+                .as_ref()
+                .and_then(|response| response.get("usage"))
+                .filter(|usage| !usage.is_null())
+                .and_then(|usage| {
+                    serde_json::from_value::<ResponseCompletedUsage>(usage.clone())
+                        .map_err(|err| debug!("failed to parse incomplete response usage: {err}"))
+                        .ok()
+                })
+                .map(Into::into);
+            return Err(ResponsesEventError::Api(ApiError::ResponseIncomplete {
+                reason,
+                token_usage,
+            }));
         }
         "response.completed" => {
             if let Some(resp_val) = event.response {
@@ -1055,6 +1072,58 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn incomplete_response_preserves_reason_and_usage() {
+        let incomplete = json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_incomplete",
+                "status": "incomplete",
+                "incomplete_details": {
+                    "reason": "max_output_tokens"
+                },
+                "usage": {
+                    "input_tokens": 120,
+                    "input_tokens_details": {
+                        "cached_tokens": 40,
+                        "cache_write_tokens": 10
+                    },
+                    "output_tokens": 30,
+                    "output_tokens_details": {
+                        "reasoning_tokens": 20
+                    },
+                    "total_tokens": 150
+                }
+            }
+        })
+        .to_string();
+        let sse = format!("event: response.incomplete\ndata: {incomplete}\n\n");
+
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        let Err(ApiError::ResponseIncomplete {
+            reason,
+            token_usage,
+        }) = &events[0]
+        else {
+            panic!("unexpected event: {:?}", events[0]);
+        };
+        assert_eq!(reason, "max_output_tokens");
+        assert_eq!(
+            token_usage,
+            &Some(TokenUsage {
+                input_tokens: 120,
+                cached_input_tokens: 40,
+                cache_write_input_tokens: 10,
+                output_tokens: 30,
+                reasoning_output_tokens: 20,
+                total_tokens: 150,
+                codex_rollout_budget_units: None,
+            })
+        );
     }
 
     #[tokio::test]

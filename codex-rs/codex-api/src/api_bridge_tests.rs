@@ -1,6 +1,7 @@
 use super::*;
 use base64::Engine;
 use codex_protocol::protocol::RateLimitReachedType;
+use codex_protocol::protocol::TokenUsage;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -22,6 +23,34 @@ fn map_api_error_preserves_retry_delay() {
         CodexErrorDetails::Stream(message) if message == "retry later"
     ));
     assert_eq!(err.retry_delay(), Some(retry_delay));
+}
+
+#[test]
+fn map_api_error_keeps_incomplete_response_terminal_and_preserves_usage() {
+    let token_usage = TokenUsage {
+        input_tokens: 120,
+        cached_input_tokens: 40,
+        cache_write_input_tokens: 10,
+        output_tokens: 30,
+        reasoning_output_tokens: 20,
+        total_tokens: 150,
+        codex_rollout_budget_units: None,
+    };
+    let err = map_api_error(ApiError::ResponseIncomplete {
+        reason: "max_output_tokens".to_string(),
+        token_usage: Some(token_usage.clone()),
+    });
+
+    let CodexErrorDetails::ResponseIncomplete {
+        reason,
+        token_usage: mapped_usage,
+    } = err.details()
+    else {
+        panic!("expected incomplete response error, got {err:?}");
+    };
+    assert_eq!(reason, "max_output_tokens");
+    assert_eq!(mapped_usage, &Some(token_usage));
+    assert!(!err.is_retryable());
 }
 
 #[test]

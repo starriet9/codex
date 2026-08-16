@@ -9,6 +9,7 @@ use crate::protocol::CodexErrorInfo;
 use crate::protocol::ErrorEvent;
 use crate::protocol::RateLimitReachedType;
 use crate::protocol::RateLimitSnapshot;
+use crate::protocol::TokenUsage;
 use crate::protocol::TruncationPolicy;
 use chrono::DateTime;
 use chrono::Datelike;
@@ -91,6 +92,11 @@ pub enum CodexErrorDetails {
     /// The Session loop treats this as a transient error and will automatically retry the turn.
     #[error("stream disconnected before completion: {0}")]
     Stream(String),
+    #[error("The model stopped before completing its response (reason: {reason}).")]
+    ResponseIncomplete {
+        reason: String,
+        token_usage: Option<TokenUsage>,
+    },
     #[error(
         "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
     )]
@@ -387,6 +393,7 @@ impl CodexErr {
             | CodexErrorDetails::ServerOverloaded
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => false,
+            CodexErrorDetails::ResponseIncomplete { .. } => false,
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout

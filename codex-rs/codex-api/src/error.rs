@@ -1,5 +1,6 @@
 use crate::rate_limits::RateLimitError;
 use codex_client::TransportError;
+use codex_protocol::protocol::TokenUsage;
 use http::StatusCode;
 use std::time::Duration;
 use thiserror::Error;
@@ -12,6 +13,11 @@ pub enum ApiError {
     Api { status: StatusCode, message: String },
     #[error("stream error: {0}")]
     Stream(String),
+    #[error("response incomplete: {reason}")]
+    ResponseIncomplete {
+        reason: String,
+        token_usage: Option<TokenUsage>,
+    },
     #[error("context window exceeded")]
     ContextWindowExceeded,
     #[error("quota exceeded")]

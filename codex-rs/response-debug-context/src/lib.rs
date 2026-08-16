@@ -76,6 +76,9 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::Transport(transport) => telemetry_transport_error_message(transport),
         ApiError::Api { status, .. } => format!("api error {}", status.as_u16()),
         ApiError::Stream(err) => err.to_string(),
+        ApiError::ResponseIncomplete { reason, .. } => {
+            format!("response incomplete: {reason}")
+        }
         ApiError::ContextWindowExceeded => "context window exceeded".to_string(),
         ApiError::QuotaExceeded => "quota exceeded".to_string(),
         ApiError::UsageNotIncluded => "usage not included".to_string(),
@@ -154,6 +157,10 @@ mod tests {
         let network = TransportError::Network("dns lookup failed".to_string());
         let build = TransportError::Build("invalid header value".to_string());
         let stream = ApiError::Stream("socket closed".to_string());
+        let incomplete = ApiError::ResponseIncomplete {
+            reason: "max_output_tokens".to_string(),
+            token_usage: None,
+        };
 
         assert_eq!(
             telemetry_transport_error_message(&network),
@@ -164,5 +171,9 @@ mod tests {
             "invalid header value"
         );
         assert_eq!(telemetry_api_error_message(&stream), "socket closed");
+        assert_eq!(
+            telemetry_api_error_message(&incomplete),
+            "response incomplete: max_output_tokens"
+        );
     }
 }
